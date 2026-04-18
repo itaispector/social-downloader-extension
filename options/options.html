@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Social Downloader — Settings</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <div class="page">
+    <header class="page-header">
+      <img src="../icons/icon48.png" alt="" width="32" height="32">
+      <h1>Social Downloader</h1>
+    </header>
+
+    <main>
+      <!-- YouTube -->
+      <section class="platform-section" id="section-youtube">
+        <h2 class="platform-title">
+          <span class="platform-icon youtube-icon">▶</span>
+          YouTube
+        </h2>
+
+        <div class="field-group">
+          <label class="field-label" for="yt-video-quality">
+            Preferred video quality
+            <span class="field-hint">Used when multiple resolutions are available</span>
+          </label>
+          <select id="yt-video-quality" class="select">
+            <option value="best">Best available</option>
+            <option value="1080p">1080p</option>
+            <option value="720p">720p</option>
+            <option value="480p">480p</option>
+            <option value="360p">360p</option>
+            <option value="240p">240p</option>
+            <option value="144p">144p</option>
+          </select>
+        </div>
+
+        <div class="field-group">
+          <label class="field-label" for="yt-audio-quality">
+            Preferred audio quality (audio-only downloads)
+          </label>
+          <select id="yt-audio-quality" class="select">
+            <option value="128kbps">128 kbps</option>
+            <option value="256kbps">256 kbps (if available)</option>
+          </select>
+        </div>
+      </section>
+
+      <!-- Facebook -->
+      <section class="platform-section" id="section-facebook">
+        <h2 class="platform-title">
+          <span class="platform-icon facebook-icon">f</span>
+          Facebook
+        </h2>
+
+        <div class="field-group">
+          <label class="field-label" for="fb-video-quality">
+            Preferred video quality
+          </label>
+          <select id="fb-video-quality" class="select">
+            <option value="hd">HD (if available)</option>
+            <option value="sd">SD</option>
+          </select>
+        </div>
+      </section>
+
+      <!-- Instagram -->
+      <section class="platform-section" id="section-instagram">
+        <h2 class="platform-title">
+          <span class="platform-icon instagram-icon">◎</span>
+          Instagram
+        </h2>
+        <p class="platform-note">
+          Instagram provides videos at original quality only. No additional quality settings are available.
+        </p>
+      </section>
+
+      <!-- TikTok -->
+      <section class="platform-section" id="section-tiktok">
+        <h2 class="platform-title">
+          <span class="platform-icon tiktok-icon">♪</span>
+          TikTok
+        </h2>
+
+        <div class="field-group">
+          <label class="checkbox-label" for="tt-watermark">
+            <input type="checkbox" id="tt-watermark" class="checkbox">
+            <span>Download with TikTok watermark</span>
+          </label>
+          <span class="field-hint indent">When unchecked, the extension will prefer the watermark-free version if available.</span>
+        </div>
+      </section>
+    </main>
+
+    <div class="save-feedback" id="save-feedback" aria-live="polite"></div>
+  </div>
+
+  <script src="options.js"></script>
+</body>
+</html>

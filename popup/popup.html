@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Social Downloader</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header class="popup-header">
+    <img src="../icons/icon48.png" alt="" width="22" height="22">
+    <h1 class="popup-title">Social Downloader</h1>
+  </header>
+
+  <main class="popup-main">
+    <div class="status-card" id="status-card">
+      <div class="status-dot" id="status-dot"></div>
+      <p class="status-text" id="status-text">Checking page…</p>
+    </div>
+
+    <p class="platforms-label">Supported platforms</p>
+    <ul class="platform-list">
+      <li class="platform-item">
+        <span class="plat-badge yt">YT</span>
+        YouTube
+      </li>
+      <li class="platform-item">
+        <span class="plat-badge fb">f</span>
+        Facebook
+      </li>
+      <li class="platform-item">
+        <span class="plat-badge ig">◎</span>
+        Instagram
+      </li>
+      <li class="platform-item">
+        <span class="plat-badge tt">♪</span>
+        TikTok
+      </li>
+    </ul>
+  </main>
+
+  <footer class="popup-footer">
+    <button class="settings-btn" id="open-settings">⚙ Settings</button>
+  </footer>
+
+  <script src="popup.js"></script>
+</body>
+</html>

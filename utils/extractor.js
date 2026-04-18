@@ -151,20 +151,22 @@ function parseDecipherOps(jsText) {
   const fnName = findDecipherFnName(jsText);
   if (!fnName) throw new Error('Could not identify decipher function');
 
+  // Capture the actual parameter name — YouTube may use any identifier, not just 'a'
   const bodyMatch = jsText.match(
-    new RegExp(`${escapeRegex(fnName)}=function\\(\\w\\)\\{([^}]+)\\}`)
+    new RegExp(`${escapeRegex(fnName)}=function\\((\\w+)\\)\\{([^}]+)\\}`)
   );
   if (!bodyMatch) throw new Error('Could not extract decipher function body');
-  const fnBody = bodyMatch[1];
+  const paramName = bodyMatch[1];
+  const fnBody = bodyMatch[2];
 
-  const helperMatch = fnBody.match(/;(\w+)\.\w+\(a/);
+  const helperMatch = fnBody.match(new RegExp(`;?(\\w+)\\.\\w+\\(${escapeRegex(paramName)}`));
   if (!helperMatch) throw new Error('Could not identify helper object');
   const helperName = helperMatch[1];
 
   const methodMap = extractHelperMethodMap(jsText, helperName);
   if (!methodMap.size) throw new Error('Could not parse helper methods');
 
-  return buildOpSequence(fnBody, helperName, methodMap);
+  return buildOpSequence(fnBody, helperName, paramName, methodMap);
 }
 
 function findDecipherFnName(jsText) {
@@ -173,6 +175,9 @@ function findDecipherFnName(jsText) {
     /\.sig\s*\|\|\s*(\w+)\s*\(/,
     /(?:^|[;,{(])(\w+)=function\(\w\)\{\w=\w\.split\(""\)/m,
     /\bsignatureCipher\b[\s\S]{0,300}?(\w+)\s*\(\s*decodeURIComponent/,
+    /\.set\(["']signature["']\s*,\s*(\w+)\s*\(/,
+    /["']signature["']\s*,\s*(\w+)\s*\(\s*decodeURIComponent/,
+    /\(\w+\)\s*\?\s*\w+\.set\([^,]+,\s*(\w+)\s*\(\s*\w+\s*\)\s*\)/,
   ];
   for (const p of patterns) {
     const m = jsText.match(p);
@@ -183,13 +188,23 @@ function findDecipherFnName(jsText) {
 
 function extractHelperMethodMap(jsText, helperName) {
   const escaped = escapeRegex(helperName);
-  const m = jsText.match(new RegExp(`var\\s+${escaped}\\s*=\\s*\\{([\\s\\S]+?)\\}\\s*;`));
-  if (!m) throw new Error(`Helper object "${helperName}" not found`);
+  const declarationPatterns = [
+    new RegExp(`var\\s+${escaped}\\s*=\\s*\\{([\\s\\S]+?)\\}\\s*;`),
+    new RegExp(`(?:let|const)\\s+${escaped}\\s*=\\s*\\{([\\s\\S]+?)\\}\\s*;`),
+    new RegExp(`${escaped}\\s*=\\s*\\{([\\s\\S]+?)\\}\\s*;`),
+  ];
+
+  let bodyContent = null;
+  for (const pat of declarationPatterns) {
+    const m = jsText.match(pat);
+    if (m) { bodyContent = m[1]; break; }
+  }
+  if (!bodyContent) throw new Error(`Helper object "${helperName}" not found`);
 
   const map = new Map();
   const re = /(\w+)\s*:\s*function\s*\([^)]*\)\s*\{([^}]+)\}/g;
   let match;
-  while ((match = re.exec(m[1])) !== null) {
+  while ((match = re.exec(bodyContent)) !== null) {
     const type = classifyOp(match[2]);
     if (type) map.set(match[1], type);
   }
@@ -199,13 +214,16 @@ function extractHelperMethodMap(jsText, helperName) {
 function classifyOp(fnBody) {
   if (/\.reverse\(\)/.test(fnBody)) return 'reverse';
   if (/\.splice\s*\(\s*0/.test(fnBody)) return 'splice';
-  if (/a\[0\]/.test(fnBody) && /a\.length/.test(fnBody)) return 'swap';
+  // Use \w instead of hardcoded 'a' since the parameter name can vary
+  if (/\w\[0\]/.test(fnBody) && /\w\.length/.test(fnBody)) return 'swap';
   return null;
 }
 
-function buildOpSequence(fnBody, helperName, methodMap) {
+function buildOpSequence(fnBody, helperName, paramName, methodMap) {
   const ops = [];
-  const re = new RegExp(`${escapeRegex(helperName)}\\.(\\w+)\\(a\\s*,?\\s*(\\d+)?\\s*\\)`, 'g');
+  const escapedHelper = escapeRegex(helperName);
+  const escapedParam = escapeRegex(paramName);
+  const re = new RegExp(`${escapedHelper}\\.(\\w+)\\(${escapedParam}\\s*,?\\s*(\\d+)?\\s*\\)`, 'g');
   let m;
   while ((m = re.exec(fnBody)) !== null) {
     const type = methodMap.get(m[1]);

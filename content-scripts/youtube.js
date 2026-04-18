@@ -18,7 +18,7 @@ function requestExtraction(command) {
     const timer = setTimeout(() => {
       window.removeEventListener('message', handler);
       reject(new Error('Extraction timed out. Reload the page and try again.'));
-    }, 8000);
+    }, 15000);
 
     function handler(event) {
       if (event.source !== window) return;

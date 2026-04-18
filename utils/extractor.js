@@ -60,10 +60,10 @@ async function extractYouTube() {
   let decipherError = null;
   if (cipherFormats.length > 0) {
     try {
-      const ops = await getDecipherOps();
+      const ctx = await getDecipherContext();
       for (const f of cipherFormats) {
         try {
-          decipheredFormats.push({ f, url: applyDecipherToFormat(f, ops) });
+          decipheredFormats.push({ f, url: applyDecipherToFormat(f, ctx) });
         } catch (err) {
           console.warn('[social-downloader] format decipher skipped:', err.message);
         }
@@ -102,23 +102,37 @@ async function extractYouTube() {
   return { title, formats };
 }
 
-function applyDecipherToFormat(f, ops) {
+function applyDecipherToFormat(f, ctx) {
   const cipherStr = f.signatureCipher || f.cipher;
   const params = new URLSearchParams(cipherStr);
-  const url = params.get('url');
+  let url = params.get('url');
   const s = params.get('s');
   const sp = params.get('sp') || 'signature';
   if (!url || !s) throw new Error('Invalid cipher params');
-  const sig = runDecipherOps(s, ops);
-  return `${url}&${sp}=${encodeURIComponent(sig)}`;
+  const sig = runDecipherOps(s, ctx.ops);
+  url = `${url}&${sp}=${encodeURIComponent(sig)}`;
+
+  // YouTube requires the 'n' parameter to be transformed to avoid 403 errors.
+  if (ctx.nsigFn) {
+    try {
+      const u = new URL(url);
+      const n = u.searchParams.get('n');
+      if (n) {
+        const nt = ctx.nsigFn(n);
+        if (nt && nt !== n) { u.searchParams.set('n', nt); url = u.toString(); }
+      }
+    } catch { /* n-transform failed — use URL as-is */ }
+  }
+
+  return url;
 }
 
-async function getDecipherOps() {
+async function getDecipherContext() {
   const playerUrl = resolvePlayerJsUrl();
   if (!playerUrl) throw new Error('Could not locate YouTube player JS');
 
   if (_decipherCache && _decipherCache.playerUrl === playerUrl) {
-    return _decipherCache.ops;
+    return _decipherCache;
   }
 
   const jsText = await fetch(playerUrl).then((r) => {
@@ -127,8 +141,10 @@ async function getDecipherOps() {
   });
 
   const ops = parseDecipherOps(jsText);
-  _decipherCache = { playerUrl, ops };
-  return ops;
+  const nsigFn = tryExtractNsigFn(jsText);
+  if (!nsigFn) console.warn('[social-downloader] nsig fn not found — downloads may get 403');
+  _decipherCache = { playerUrl, ops, nsigFn };
+  return _decipherCache;
 }
 
 function resolvePlayerJsUrl() {
@@ -139,6 +155,96 @@ function resolvePlayerJsUrl() {
 
   for (const s of document.querySelectorAll('script[src]')) {
     if (s.src.includes('/base.js')) return s.src;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// nsig (n-parameter) transform — required since ~2022 to avoid 403 errors.
+// YouTube embeds an 'n' parameter in streaming URLs that must be transformed
+// by a function in the player JS before the URL can be used for download.
+// The function is self-contained (no closures), so new Function() works here.
+// ---------------------------------------------------------------------------
+
+function tryExtractNsigFn(jsText) {
+  try {
+    const ref = findNsigRef(jsText);
+    if (!ref) return null;
+    const fnStr = ref.index !== null
+      ? extractIndexedArrayFn(jsText, ref.name, ref.index)
+      : extractNamedFn(jsText, ref.name);
+    if (!fnStr) return null;
+    // eslint-disable-next-line no-new-func
+    return new Function(`return (${fnStr})`)();
+  } catch (err) {
+    console.warn('[social-downloader] nsig extract error:', err.message);
+    return null;
+  }
+}
+
+function findNsigRef(jsText) {
+  // Array-indexed call site: &&(b=NAME[idx](b)
+  let m = jsText.match(/&&\([a-z]=([a-zA-Z0-9$]{1,4})\[(\d+)\]\([a-z]\)/);
+  if (m) return { name: m[1], index: parseInt(m[2]) };
+  // Direct call site: &&(b=NAME(b),c.set("n"
+  m = jsText.match(/&&\([a-z]=([a-zA-Z0-9$]{2,})\([a-z]\),[a-z]\.set\("n"/);
+  if (m) return { name: m[1], index: null };
+  // Alternate array pattern: .get("n"))&&(b=NAME[0](b)
+  m = jsText.match(/\.get\("n"\)\)&&\(b=([a-zA-Z0-9$]{1,4})\[(\d+)\]\(b\)/);
+  if (m) return { name: m[1], index: parseInt(m[2]) };
+  // Alternate direct pattern
+  m = jsText.match(/\.get\("n"\)\)&&\(b=([a-zA-Z0-9$]{2,})\(b\)/);
+  if (m) return { name: m[1], index: null };
+  return null;
+}
+
+// Extract a named function (assignment or declaration style) using brace counting.
+function extractNamedFn(jsText, name) {
+  const esc = escapeRegex(name);
+  const m = jsText.match(new RegExp(`(?:function\\s+${esc}|${esc}\\s*=\\s*function)\\s*\\(`));
+  if (!m) return null;
+  const braceIdx = jsText.indexOf('{', m.index + m[0].length - 1);
+  if (braceIdx === -1) return null;
+  return extractByBraceCount(jsText, m.index, braceIdx);
+}
+
+// Extract the idx-th function literal from an array variable.
+function extractIndexedArrayFn(jsText, arrayName, idx) {
+  const esc = escapeRegex(arrayName);
+  const m = jsText.match(new RegExp(`${esc}\\s*=\\s*\\[`));
+  if (!m) return null;
+  const arrStart = jsText.indexOf('[', m.index + m[0].length - 1);
+  let fnCount = 0, i = arrStart + 1;
+  while (i < jsText.length) {
+    const fi = jsText.indexOf('function', i);
+    if (fi === -1 || jsText[fi - 1] === ']') break; // past array end
+    const bi = jsText.indexOf('{', fi);
+    if (bi === -1) break;
+    const fnStr = extractByBraceCount(jsText, fi, bi);
+    if (!fnStr) break;
+    if (fnCount === idx) return fnStr;
+    fnCount++;
+    i = fi + fnStr.length;
+  }
+  return null;
+}
+
+// Walk from braceIdx counting '{'/'}', return substring from defStart to closing '}'.
+// Handles string literals so brace characters inside strings are ignored.
+function extractByBraceCount(jsText, defStart, braceIdx) {
+  let depth = 0, inStr = false, strCh = '';
+  for (let i = braceIdx; i < jsText.length; i++) {
+    const ch = jsText[i];
+    if (inStr) {
+      if (ch === strCh && jsText[i - 1] !== '\\') inStr = false;
+    } else if (ch === '"' || ch === "'" || ch === '`') {
+      inStr = true; strCh = ch;
+    } else if (ch === '{') {
+      depth++;
+    } else if (ch === '}') {
+      depth--;
+      if (depth === 0) return jsText.substring(defStart, i + 1);
+    }
   }
   return null;
 }

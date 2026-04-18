@@ -1,0 +1,273 @@
+/* ============================================================
+   Social Downloader — injected stylesheet
+   All selectors scoped under .sdl-* to avoid host-page collisions.
+   `all: initial` on containers prevents inheriting host-page styles.
+   ============================================================ */
+
+/* --- Reset & base ----------------------------------------- */
+.sdl-download-btn,
+.sdl-download-btn *,
+#sdl-modal,
+#sdl-modal *,
+.sdl-error-toast {
+  all: initial;
+  box-sizing: border-box !important;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif !important;
+}
+
+/* --- Download button wrapper ------------------------------- */
+.sdl-download-btn {
+  display: inline-flex !important;
+  align-items: center !important;
+  vertical-align: middle !important;
+}
+
+/* --- Inner button ------------------------------------------ */
+.sdl-btn-inner {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  cursor: pointer !important;
+  border: none !important;
+  background: transparent !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  white-space: nowrap !important;
+  transition: background 0.15s, opacity 0.15s !important;
+  user-select: none !important;
+}
+
+.sdl-btn-inner.sdl-loading {
+  opacity: 0.5 !important;
+  pointer-events: none !important;
+}
+
+.sdl-btn-inner svg {
+  flex-shrink: 0 !important;
+  display: block !important;
+}
+
+/* --- YouTube style ----------------------------------------- */
+.sdl-yt-btn {
+  margin-left: 8px !important;
+}
+
+.sdl-yt-btn .sdl-btn-inner {
+  height: 36px !important;
+  padding: 0 16px !important;
+  border-radius: 18px !important;
+  background: #f2f2f2 !important;
+  color: #0f0f0f !important;
+  font-size: 14px !important;
+  font-weight: 500 !important;
+  line-height: 36px !important;
+}
+
+.sdl-yt-btn .sdl-btn-inner:hover {
+  background: #e5e5e5 !important;
+}
+
+/* --- Facebook style --------------------------------------- */
+.sdl-fb-btn {
+  margin-left: 4px !important;
+}
+
+.sdl-fb-btn .sdl-btn-inner {
+  height: 32px !important;
+  padding: 0 12px !important;
+  border-radius: 6px !important;
+  background: #e4e6eb !important;
+  color: #050505 !important;
+  font-size: 15px !important;
+  font-weight: 600 !important;
+}
+
+.sdl-fb-btn .sdl-btn-inner:hover {
+  background: #d8dadf !important;
+}
+
+/* --- Instagram style -------------------------------------- */
+.sdl-ig-btn {
+  display: inline-flex !important;
+  align-items: center !important;
+}
+
+.sdl-ig-btn .sdl-btn-inner {
+  padding: 8px !important;
+  border-radius: 50% !important;
+  color: #262626 !important;
+}
+
+.sdl-ig-btn .sdl-btn-inner:hover {
+  background: rgba(0, 0, 0, 0.06) !important;
+}
+
+.sdl-ig-btn .sdl-btn-label {
+  display: none !important;
+}
+
+/* --- TikTok style ----------------------------------------- */
+.sdl-tt-btn {
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important;
+  margin-top: 8px !important;
+}
+
+.sdl-tt-btn .sdl-btn-inner {
+  flex-direction: column !important;
+  align-items: center !important;
+  gap: 4px !important;
+  padding: 8px !important;
+  border-radius: 50% !important;
+  color: #161823 !important;
+  background: rgba(22, 24, 35, 0.06) !important;
+  width: 48px !important;
+  height: 48px !important;
+  justify-content: center !important;
+}
+
+.sdl-tt-btn .sdl-btn-inner:hover {
+  background: rgba(22, 24, 35, 0.12) !important;
+}
+
+.sdl-tt-btn .sdl-btn-label {
+  font-size: 12px !important;
+  color: #161823 !important;
+  margin-top: 4px !important;
+}
+
+/* --- Modal ------------------------------------------------- */
+#sdl-modal {
+  position: fixed !important;
+  z-index: 2147483647 !important;
+  background: #ffffff !important;
+  border-radius: 12px !important;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18), 0 2px 8px rgba(0, 0, 0, 0.08) !important;
+  min-width: 280px !important;
+  max-width: 380px !important;
+  overflow: hidden !important;
+  animation: sdl-fadein 0.15s ease !important;
+}
+
+@keyframes sdl-fadein {
+  from { opacity: 0; transform: translateY(-6px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0)   scale(1); }
+}
+
+.sdl-modal-header {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  padding: 14px 16px !important;
+  border-bottom: 1px solid #ebebeb !important;
+  gap: 8px !important;
+}
+
+.sdl-modal-title {
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  color: #111111 !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+  flex: 1 !important;
+}
+
+.sdl-modal-close {
+  cursor: pointer !important;
+  background: none !important;
+  border: none !important;
+  font-size: 20px !important;
+  line-height: 1 !important;
+  color: #888888 !important;
+  padding: 2px 6px !important;
+  border-radius: 4px !important;
+  flex-shrink: 0 !important;
+}
+
+.sdl-modal-close:hover {
+  background: #f0f0f0 !important;
+  color: #333333 !important;
+}
+
+.sdl-modal-body {
+  padding: 8px 0 12px !important;
+}
+
+.sdl-modal-section {
+  padding: 0 16px !important;
+  margin-bottom: 4px !important;
+}
+
+.sdl-section-label {
+  font-size: 11px !important;
+  font-weight: 700 !important;
+  color: #888888 !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.06em !important;
+  margin: 10px 0 6px !important;
+  display: block !important;
+}
+
+.sdl-download-option {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  width: 100% !important;
+  padding: 10px 12px !important;
+  margin: 3px 0 !important;
+  background: #f7f7f7 !important;
+  border: none !important;
+  border-radius: 8px !important;
+  cursor: pointer !important;
+  font-size: 13px !important;
+  color: #111111 !important;
+  text-align: left !important;
+  transition: background 0.1s !important;
+  gap: 8px !important;
+}
+
+.sdl-download-option:hover {
+  background: #ebebeb !important;
+}
+
+.sdl-option-label {
+  flex: 1 !important;
+  font-size: 13px !important;
+  color: #111111 !important;
+}
+
+.sdl-quality-badge {
+  background: #0066cc !important;
+  color: #ffffff !important;
+  border-radius: 4px !important;
+  padding: 2px 8px !important;
+  font-size: 11px !important;
+  font-weight: 700 !important;
+  flex-shrink: 0 !important;
+}
+
+.sdl-no-formats {
+  padding: 8px 12px !important;
+  font-size: 13px !important;
+  color: #888888 !important;
+  font-style: italic !important;
+}
+
+/* --- Error toast ------------------------------------------ */
+.sdl-error-toast {
+  position: fixed !important;
+  bottom: 24px !important;
+  right: 24px !important;
+  background: #cc3300 !important;
+  color: #ffffff !important;
+  padding: 12px 20px !important;
+  border-radius: 8px !important;
+  font-size: 14px !important;
+  z-index: 2147483647 !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.22) !important;
+  max-width: 360px !important;
+  animation: sdl-fadein 0.2s ease !important;
+  line-height: 1.4 !important;
+}

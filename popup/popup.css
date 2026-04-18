@@ -1,0 +1,134 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+  font-size: 14px;
+  color: #111;
+  background: #fff;
+  width: 300px;
+  min-height: 200px;
+}
+
+/* Header */
+.popup-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid #ebebeb;
+}
+
+.popup-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: #111;
+}
+
+/* Main */
+.popup-main {
+  padding: 14px 16px;
+}
+
+/* Status card */
+.status-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 10px;
+  background: #f7f7f7;
+  margin-bottom: 14px;
+}
+
+.status-card.active   { background: #e8f5e9; }
+.status-card.inactive { background: #f7f7f7; }
+
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-top: 2px;
+  background: #bbb;
+}
+
+.status-dot.active   { background: #2d8a4e; }
+.status-dot.inactive { background: #bbb; }
+
+.status-text {
+  font-size: 13px;
+  color: #333;
+  line-height: 1.45;
+}
+
+/* Platform list */
+.platforms-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 8px;
+}
+
+.platform-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.platform-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: #333;
+}
+
+.plat-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  flex-shrink: 0;
+}
+
+.plat-badge.yt { background: #ff0000; }
+.plat-badge.fb { background: #1877f2; font-size: 14px; }
+.plat-badge.ig {
+  background: linear-gradient(135deg, #f09433, #e6683c, #dc2743, #cc2366, #bc1888);
+  font-size: 13px;
+}
+.plat-badge.tt { background: #161823; font-size: 13px; }
+
+/* Footer */
+.popup-footer {
+  padding: 10px 16px 14px;
+  border-top: 1px solid #ebebeb;
+}
+
+.settings-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px 14px;
+  background: #f2f2f2;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #333;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.settings-btn:hover {
+  background: #e5e5e5;
+}

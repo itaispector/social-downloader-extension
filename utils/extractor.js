@@ -57,18 +57,20 @@ async function extractYouTube() {
   const cipherFormats = allFormats.filter((f) => !f.url && (f.signatureCipher || f.cipher));
 
   let decipheredFormats = [];
+  let decipherError = null;
   if (cipherFormats.length > 0) {
     try {
       const ops = await getDecipherOps();
       for (const f of cipherFormats) {
         try {
           decipheredFormats.push({ f, url: applyDecipherToFormat(f, ops) });
-        } catch {
-          // skip formats that can't be deciphered
+        } catch (err) {
+          console.warn('[social-downloader] format decipher skipped:', err.message);
         }
       }
-    } catch {
-      // decipher unavailable — fall through to plain formats only
+    } catch (err) {
+      decipherError = err.message;
+      console.error('[social-downloader] decipher failed:', err);
     }
   }
 
@@ -78,7 +80,8 @@ async function extractYouTube() {
   ];
 
   if (!allResolved.length) {
-    throw new Error('No downloadable streams found. YouTube may have changed their encryption. Try reloading the page.');
+    const reason = decipherError ? ` (${decipherError})` : '';
+    throw new Error(`No downloadable streams found. YouTube may have changed their encryption${reason}. Try reloading the page.`);
   }
 
   const formats = allResolved.map(({ f, url }) => {
@@ -149,35 +152,47 @@ function resolvePlayerJsUrl() {
 
 function parseDecipherOps(jsText) {
   const fnName = findDecipherFnName(jsText);
-  if (!fnName) throw new Error('Could not identify decipher function');
+  if (!fnName) throw new Error('Could not identify decipher function name');
 
-  // Capture the actual parameter name — YouTube may use any identifier, not just 'a'
-  const bodyMatch = jsText.match(
-    new RegExp(`${escapeRegex(fnName)}=function\\((\\w+)\\)\\{([^}]+)\\}`)
-  );
-  if (!bodyMatch) throw new Error('Could not extract decipher function body');
+  const esc = escapeRegex(fnName);
+  // Support both: fnName=function(param){body}  and  function fnName(param){body}
+  const bodyMatch =
+    jsText.match(new RegExp(`${esc}=function\\((\\w+)\\)\\{([^}]+)\\}`)) ||
+    jsText.match(new RegExp(`function\\s+${esc}\\s*\\((\\w+)\\)\\s*\\{([^}]+)\\}`));
+  if (!bodyMatch) throw new Error(`Could not extract body of decipher function "${fnName}"`);
   const paramName = bodyMatch[1];
   const fnBody = bodyMatch[2];
 
   const helperMatch = fnBody.match(new RegExp(`;?(\\w+)\\.\\w+\\(${escapeRegex(paramName)}`));
-  if (!helperMatch) throw new Error('Could not identify helper object');
+  if (!helperMatch) throw new Error('Could not identify helper object in decipher body');
   const helperName = helperMatch[1];
 
   const methodMap = extractHelperMethodMap(jsText, helperName);
-  if (!methodMap.size) throw new Error('Could not parse helper methods');
+  if (!methodMap.size) throw new Error(`Could not parse helper methods from object "${helperName}"`);
 
   return buildOpSequence(fnBody, helperName, paramName, methodMap);
 }
 
 function findDecipherFnName(jsText) {
   const patterns = [
+    // yt-dlp-style: general encodeURIComponent pattern around signature setting
+    /\b[a-zA-Z0-9$]+\s*&&\s*[a-zA-Z0-9$]+\.set\([^,]+,\s*encodeURIComponent\s*\(\s*(\w+)\s*\(/,
+    /\b[cs]\s*&&\s*[adf]\.set\([^,]+,\s*encodeURIComponent\s*\(\s*(\w+)\s*\(/,
+    // Classic pattern
     /\bc&&d\.set\([^,]+,\s*(?:encodeURIComponent\s*\()?\s*(\w+)\s*\(/,
     /\.sig\s*\|\|\s*(\w+)\s*\(/,
+    // Split("") function definition — flexible variable name
+    /(?:\b|[^a-zA-Z0-9$])(\w{2,})\s*=\s*function\s*\(\s*\w\s*\)\s*\{\s*\w\s*=\s*\w\s*\.split\s*\(\s*""\s*\)/,
     /(?:^|[;,{(])(\w+)=function\(\w\)\{\w=\w\.split\(""\)/m,
+    // signatureCipher nearby
     /\bsignatureCipher\b[\s\S]{0,300}?(\w+)\s*\(\s*decodeURIComponent/,
+    // "signature" string literal near the call
     /\.set\(["']signature["']\s*,\s*(\w+)\s*\(/,
     /["']signature["']\s*,\s*(\w+)\s*\(\s*decodeURIComponent/,
+    // Ternary/conditional pattern
     /\(\w+\)\s*\?\s*\w+\.set\([^,]+,\s*(\w+)\s*\(\s*\w+\s*\)\s*\)/,
+    // Fallback: any 2+ char fn immediately before decodeURIComponent
+    /[;,]\s*(\w{2,})\s*\(\s*decodeURIComponent\s*\(\s*\w+\.get\s*\(\s*["']s["']/,
   ];
   for (const p of patterns) {
     const m = jsText.match(p);
@@ -192,6 +207,9 @@ function extractHelperMethodMap(jsText, helperName) {
     new RegExp(`var\\s+${escaped}\\s*=\\s*\\{([\\s\\S]+?)\\}\\s*;`),
     new RegExp(`(?:let|const)\\s+${escaped}\\s*=\\s*\\{([\\s\\S]+?)\\}\\s*;`),
     new RegExp(`${escaped}\\s*=\\s*\\{([\\s\\S]+?)\\}\\s*;`),
+    // Without semicolon terminator (some minifiers omit it)
+    new RegExp(`var\\s+${escaped}\\s*=\\s*\\{([\\s\\S]+?)\\}(?=\\s*(?:var|let|const|function|\\())`),
+    new RegExp(`${escaped}\\s*=\\s*\\{([\\s\\S]+?)\\}(?=\\s*(?:var|let|const|function|\\())`),
   ];
 
   let bodyContent = null;

@@ -1,7 +1,7 @@
 // Runs in PAGE context (not the isolated content-script world).
 // Receives commands via window.postMessage and replies with extracted media data.
 
-window.addEventListener('message', (event) => {
+window.addEventListener('message', async (event) => {
   if (event.source !== window) return;
   if (!event.data || event.data.direction !== 'from-content-script') return;
 
@@ -11,7 +11,7 @@ window.addEventListener('message', (event) => {
     let result;
     switch (command) {
       case 'EXTRACT_YOUTUBE':
-        result = extractYouTube();
+        result = await extractYouTube();
         break;
       case 'EXTRACT_FACEBOOK':
         result = extractFacebook();
@@ -34,7 +34,11 @@ window.addEventListener('message', (event) => {
 // ---------------------------------------------------------------------------
 // YouTube
 // ---------------------------------------------------------------------------
-function extractYouTube() {
+
+// Cache keyed by player URL so we only parse once per session.
+let _decipherCache = null;
+
+async function extractYouTube() {
   const data = window.ytInitialPlayerResponse;
   if (!data) throw new Error('ytInitialPlayerResponse not found. Try reloading the page.');
 
@@ -43,41 +47,192 @@ function extractYouTube() {
 
   const title = sanitizeFilename(data.videoDetails?.title || 'youtube-video');
 
-  // Only include formats that have a plain URL (skip signatureCipher / encrypted streams)
-  const muxed = (streaming.formats || [])
-    .filter((f) => f.url)
-    .map((f) => ({
-      kind: 'muxed',
-      url: f.url,
-      qualityLabel: f.qualityLabel || '',
-      mimeType: f.mimeType || '',
-      bitrate: f.bitrate || 0,
-      height: f.height || 0,
-      contentLength: f.contentLength || null,
-    }));
+  const allFormats = [
+    ...(streaming.formats || []),
+    ...(streaming.adaptiveFormats || []),
+  ];
+  const muxedSet = new Set(streaming.formats || []);
 
-  const adaptive = (streaming.adaptiveFormats || [])
-    .filter((f) => f.url)
-    .map((f) => {
-      const isAudio = (f.mimeType || '').startsWith('audio/');
-      return {
-        kind: isAudio ? 'audio' : 'video',
-        url: f.url,
-        qualityLabel: f.qualityLabel || null,
-        mimeType: f.mimeType || '',
-        bitrate: f.averageBitrate || f.bitrate || 0,
-        height: f.height || 0,
-        audioQuality: f.audioQuality || null,
-        contentLength: f.contentLength || null,
-      };
-    });
+  const plainFormats = allFormats.filter((f) => f.url);
+  const cipherFormats = allFormats.filter((f) => !f.url && (f.signatureCipher || f.cipher));
 
-  const formats = [...muxed, ...adaptive];
-  if (!formats.length) {
-    throw new Error('No downloadable streams found. YouTube may have encrypted all formats for this video.');
+  let decipheredFormats = [];
+  if (cipherFormats.length > 0) {
+    try {
+      const ops = await getDecipherOps();
+      for (const f of cipherFormats) {
+        try {
+          decipheredFormats.push({ f, url: applyDecipherToFormat(f, ops) });
+        } catch {
+          // skip formats that can't be deciphered
+        }
+      }
+    } catch {
+      // decipher unavailable — fall through to plain formats only
+    }
   }
 
+  const allResolved = [
+    ...plainFormats.map((f) => ({ f, url: f.url })),
+    ...decipheredFormats,
+  ];
+
+  if (!allResolved.length) {
+    throw new Error('No downloadable streams found. YouTube may have changed their encryption. Try reloading the page.');
+  }
+
+  const formats = allResolved.map(({ f, url }) => {
+    const isMuxed = muxedSet.has(f);
+    const isAudio = (f.mimeType || '').startsWith('audio/');
+    return {
+      kind: isMuxed ? 'muxed' : (isAudio ? 'audio' : 'video'),
+      url,
+      qualityLabel: f.qualityLabel || '',
+      mimeType: f.mimeType || '',
+      bitrate: f.averageBitrate || f.bitrate || 0,
+      height: f.height || 0,
+      audioQuality: f.audioQuality || null,
+      contentLength: f.contentLength || null,
+    };
+  });
+
   return { title, formats };
+}
+
+function applyDecipherToFormat(f, ops) {
+  const cipherStr = f.signatureCipher || f.cipher;
+  const params = new URLSearchParams(cipherStr);
+  const url = params.get('url');
+  const s = params.get('s');
+  const sp = params.get('sp') || 'signature';
+  if (!url || !s) throw new Error('Invalid cipher params');
+  const sig = runDecipherOps(s, ops);
+  return `${url}&${sp}=${encodeURIComponent(sig)}`;
+}
+
+async function getDecipherOps() {
+  const playerUrl = resolvePlayerJsUrl();
+  if (!playerUrl) throw new Error('Could not locate YouTube player JS');
+
+  if (_decipherCache && _decipherCache.playerUrl === playerUrl) {
+    return _decipherCache.ops;
+  }
+
+  const jsText = await fetch(playerUrl).then((r) => {
+    if (!r.ok) throw new Error(`Failed to fetch player JS: ${r.status}`);
+    return r.text();
+  });
+
+  const ops = parseDecipherOps(jsText);
+  _decipherCache = { playerUrl, ops };
+  return ops;
+}
+
+function resolvePlayerJsUrl() {
+  try {
+    const url = window.ytcfg?.get('PLAYER_JS_URL');
+    if (url) return url.startsWith('http') ? url : `https://www.youtube.com${url}`;
+  } catch {}
+
+  for (const s of document.querySelectorAll('script[src]')) {
+    if (s.src.includes('/base.js')) return s.src;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Decipher algorithm parser — no eval/new Function needed.
+// YouTube's signature decipher is always a sequence of three possible ops:
+//   reverse(a), splice(a, n), swap(a, n)
+// We parse which ops are applied and replay them directly.
+// ---------------------------------------------------------------------------
+
+function parseDecipherOps(jsText) {
+  const fnName = findDecipherFnName(jsText);
+  if (!fnName) throw new Error('Could not identify decipher function');
+
+  const bodyMatch = jsText.match(
+    new RegExp(`${escapeRegex(fnName)}=function\\(\\w\\)\\{([^}]+)\\}`)
+  );
+  if (!bodyMatch) throw new Error('Could not extract decipher function body');
+  const fnBody = bodyMatch[1];
+
+  const helperMatch = fnBody.match(/;(\w+)\.\w+\(a/);
+  if (!helperMatch) throw new Error('Could not identify helper object');
+  const helperName = helperMatch[1];
+
+  const methodMap = extractHelperMethodMap(jsText, helperName);
+  if (!methodMap.size) throw new Error('Could not parse helper methods');
+
+  return buildOpSequence(fnBody, helperName, methodMap);
+}
+
+function findDecipherFnName(jsText) {
+  const patterns = [
+    /\bc&&d\.set\([^,]+,\s*(?:encodeURIComponent\s*\()?\s*(\w+)\s*\(/,
+    /\.sig\s*\|\|\s*(\w+)\s*\(/,
+    /(?:^|[;,{(])(\w+)=function\(\w\)\{\w=\w\.split\(""\)/m,
+    /\bsignatureCipher\b[\s\S]{0,300}?(\w+)\s*\(\s*decodeURIComponent/,
+  ];
+  for (const p of patterns) {
+    const m = jsText.match(p);
+    if (m?.[1] && m[1].length > 1) return m[1];
+  }
+  return null;
+}
+
+function extractHelperMethodMap(jsText, helperName) {
+  const escaped = escapeRegex(helperName);
+  const m = jsText.match(new RegExp(`var\\s+${escaped}\\s*=\\s*\\{([\\s\\S]+?)\\}\\s*;`));
+  if (!m) throw new Error(`Helper object "${helperName}" not found`);
+
+  const map = new Map();
+  const re = /(\w+)\s*:\s*function\s*\([^)]*\)\s*\{([^}]+)\}/g;
+  let match;
+  while ((match = re.exec(m[1])) !== null) {
+    const type = classifyOp(match[2]);
+    if (type) map.set(match[1], type);
+  }
+  return map;
+}
+
+function classifyOp(fnBody) {
+  if (/\.reverse\(\)/.test(fnBody)) return 'reverse';
+  if (/\.splice\s*\(\s*0/.test(fnBody)) return 'splice';
+  if (/a\[0\]/.test(fnBody) && /a\.length/.test(fnBody)) return 'swap';
+  return null;
+}
+
+function buildOpSequence(fnBody, helperName, methodMap) {
+  const ops = [];
+  const re = new RegExp(`${escapeRegex(helperName)}\\.(\\w+)\\(a\\s*,?\\s*(\\d+)?\\s*\\)`, 'g');
+  let m;
+  while ((m = re.exec(fnBody)) !== null) {
+    const type = methodMap.get(m[1]);
+    if (type) ops.push({ type, arg: m[2] ? parseInt(m[2], 10) : undefined });
+  }
+  return ops;
+}
+
+function runDecipherOps(sig, ops) {
+  const a = sig.split('');
+  for (const { type, arg } of ops) {
+    if (type === 'reverse') {
+      a.reverse();
+    } else if (type === 'splice') {
+      a.splice(0, arg);
+    } else if (type === 'swap') {
+      const idx = arg % a.length;
+      const c = a[0];
+      a[0] = a[idx];
+      a[idx] = c;
+    }
+  }
+  return a.join('');
+}
+
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 // ---------------------------------------------------------------------------

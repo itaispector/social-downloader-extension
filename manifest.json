@@ -12,7 +12,8 @@
     "*://*.youtube.com/*",
     "*://*.facebook.com/*",
     "*://*.instagram.com/*",
-    "*://*.tiktok.com/*"
+    "*://*.tiktok.com/*",
+    "*://api.cobalt.tools/*"
   ],
   "background": {
     "service_worker": "background/service-worker.js",

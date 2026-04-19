@@ -42,10 +42,23 @@ async function extractYouTube() {
   const data = window.ytInitialPlayerResponse;
   if (!data) throw new Error('ytInitialPlayerResponse not found. Try reloading the page.');
 
-  const streaming = data.streamingData;
-  if (!streaming) throw new Error('No streaming data available. The video may be private or age-restricted.');
+  const videoId = data.videoDetails?.videoId;
+  if (!videoId) throw new Error('Could not determine video ID.');
 
   const title = sanitizeFilename(data.videoDetails?.title || 'youtube-video');
+
+  // Strategy 1: InnerTube API with Android client.
+  // Returns plain URLs (no signatureCipher), much more reliable than parsing the player JS.
+  try {
+    const formats = await fetchInnerTubeFormats(videoId);
+    if (formats && formats.length) return { title, formats };
+  } catch (e) {
+    console.warn('[social-downloader] InnerTube strategy failed, falling back:', e.message);
+  }
+
+  // Strategy 2: Parse ytInitialPlayerResponse with signature decipher + nsig.
+  const streaming = data.streamingData;
+  if (!streaming) throw new Error('No streaming data available. The video may be private or age-restricted.');
 
   const allFormats = [
     ...(streaming.formats || []),
@@ -102,6 +115,96 @@ async function extractYouTube() {
   return { title, formats };
 }
 
+// ---------------------------------------------------------------------------
+// InnerTube API strategy — Android client returns plain URLs, no cipher needed.
+// ---------------------------------------------------------------------------
+
+async function fetchInnerTubeFormats(videoId) {
+  const apiKey = window.ytcfg?.get('INNERTUBE_API_KEY') || '';
+  const url = `https://www.youtube.com/youtubei/v1/player${apiKey ? '?key=' + apiKey : ''}`;
+
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      videoId,
+      context: {
+        client: {
+          clientName: 'ANDROID',
+          clientVersion: '19.09.37',
+          androidSdkVersion: 30,
+          userAgent: 'com.google.android.youtube/19.09.37 (Linux; U; Android 12) gzip',
+          hl: 'en',
+          gl: 'US',
+        },
+      },
+    }),
+  });
+
+  if (!resp.ok) throw new Error(`InnerTube HTTP ${resp.status}`);
+  const data = await resp.json();
+
+  if (data.playabilityStatus?.status !== 'OK') {
+    throw new Error(`Not playable: ${data.playabilityStatus?.reason || data.playabilityStatus?.status}`);
+  }
+
+  const streaming = data.streamingData;
+  if (!streaming) throw new Error('No streamingData in InnerTube response');
+
+  const allFormats = [...(streaming.formats || []), ...(streaming.adaptiveFormats || [])];
+  const muxedSet = new Set(streaming.formats || []);
+
+  // Android client returns plain URLs — filter out any that still have ciphers.
+  const plainFormats = allFormats.filter((f) => f.url);
+  if (!plainFormats.length) throw new Error('InnerTube returned no plain URLs');
+
+  // Still apply nsig (n-param) transform to each URL.
+  const nsigFn = await getNsigFn();
+
+  return plainFormats.map((f) => {
+    let finalUrl = applyNsig(f.url, nsigFn);
+    const isMuxed = muxedSet.has(f);
+    const isAudio = (f.mimeType || '').startsWith('audio/');
+    return {
+      kind: isMuxed ? 'muxed' : (isAudio ? 'audio' : 'video'),
+      url: finalUrl,
+      qualityLabel: f.qualityLabel || '',
+      mimeType: f.mimeType || '',
+      bitrate: f.averageBitrate || f.bitrate || 0,
+      height: f.height || 0,
+      audioQuality: f.audioQuality || null,
+      contentLength: f.contentLength || null,
+    };
+  });
+}
+
+function applyNsig(url, nsigFn) {
+  if (!nsigFn) return url;
+  try {
+    const u = new URL(url);
+    const n = u.searchParams.get('n');
+    if (!n) return url;
+    const nt = nsigFn(n);
+    if (nt && nt !== n) { u.searchParams.set('n', nt); return u.toString(); }
+  } catch {}
+  return url;
+}
+
+async function getNsigFn() {
+  if (_decipherCache?.nsigFn) return _decipherCache.nsigFn;
+  try {
+    const playerUrl = resolvePlayerJsUrl();
+    if (!playerUrl) return null;
+    const jsText = await fetch(playerUrl).then((r) => r.text());
+    const fn = tryExtractNsigFn(jsText);
+    // Store so we don't re-fetch
+    _decipherCache = { ...(_decipherCache || {}), playerUrl, nsigFn: fn };
+    return fn;
+  } catch {
+    return null;
+  }
+}
+
 function applyDecipherToFormat(f, ctx) {
   const cipherStr = f.signatureCipher || f.cipher;
   const params = new URLSearchParams(cipherStr);
@@ -112,19 +215,7 @@ function applyDecipherToFormat(f, ctx) {
   const sig = runDecipherOps(s, ctx.ops);
   url = `${url}&${sp}=${encodeURIComponent(sig)}`;
 
-  // YouTube requires the 'n' parameter to be transformed to avoid 403 errors.
-  if (ctx.nsigFn) {
-    try {
-      const u = new URL(url);
-      const n = u.searchParams.get('n');
-      if (n) {
-        const nt = ctx.nsigFn(n);
-        if (nt && nt !== n) { u.searchParams.set('n', nt); url = u.toString(); }
-      }
-    } catch { /* n-transform failed — use URL as-is */ }
-  }
-
-  return url;
+  return applyNsig(url, ctx.nsigFn);
 }
 
 async function getDecipherContext() {

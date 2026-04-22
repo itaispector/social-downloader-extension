@@ -248,6 +248,10 @@
   flex-shrink: 0 !important;
 }
 
+.sdl-badge-mp3 {
+  background: #1db954 !important;
+}
+
 .sdl-no-formats {
   padding: 8px 12px !important;
   font-size: 13px !important;

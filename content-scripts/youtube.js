@@ -208,7 +208,7 @@ async function onButtonClick(e) {
 
   setLoading(btn, false);
 
-  const modal = buildModal(data, settings.youtube || {});
+  const modal = buildModal(data, settings.youtube || {}, currentVideoId);
   document.body.appendChild(modal);
   // Force a layout pass so offsetHeight is correct before positioning
   modal.getBoundingClientRect();
@@ -253,7 +253,7 @@ function filterAudioFormats(formats, qualityPref) {
 // Modal builder
 // ---------------------------------------------------------------------------
 
-function buildModal(data, ytSettings) {
+function buildModal(data, ytSettings, videoId) {
   const { videoQuality = 'best', audioQuality = '128kbps' } = ytSettings;
   const videoFormats = filterVideoFormats(data.formats, videoQuality);
   const audioFormats = filterAudioFormats(data.formats, audioQuality);
@@ -314,6 +314,17 @@ function buildModal(data, ytSettings) {
   audioLabel.textContent = 'Audio only';
   audioSection.appendChild(audioLabel);
 
+  if (videoId) {
+    const mp3Btn = document.createElement('button');
+    mp3Btn.className = 'sdl-download-option';
+    mp3Btn.innerHTML = `
+      <span class="sdl-option-label">Audio · MP3</span>
+      <span class="sdl-quality-badge sdl-badge-mp3">128 kbps</span>
+    `;
+    mp3Btn.addEventListener('click', () => triggerMP3Download(videoId, `${data.title} (audio).mp3`));
+    audioSection.appendChild(mp3Btn);
+  }
+
   if (audioFormats.length) {
     const seen = new Set();
     audioFormats.forEach((f) => {
@@ -350,4 +361,22 @@ function buildModal(data, ytSettings) {
 function triggerDownload(url, filename, platform) {
   removeModal();
   sendDownloadRequest(url, filename, platform).catch((err) => showError(err.message));
+}
+
+function sendCobaltMP3Request(videoId, filename) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(
+      { type: 'COBALT_MP3_REQUEST', payload: { videoId, filename } },
+      (response) => {
+        if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+        if (response?.success) resolve(response.downloadId);
+        else reject(new Error(response?.error || 'MP3 conversion failed'));
+      }
+    );
+  });
+}
+
+function triggerMP3Download(videoId, filename) {
+  removeModal();
+  sendCobaltMP3Request(videoId, filename).catch((err) => showError(err.message));
 }

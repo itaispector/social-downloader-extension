@@ -42,10 +42,23 @@ async function extractYouTube() {
   const data = window.ytInitialPlayerResponse;
   if (!data) throw new Error('ytInitialPlayerResponse not found. Try reloading the page.');
 
-  const streaming = data.streamingData;
-  if (!streaming) throw new Error('No streaming data available. The video may be private or age-restricted.');
+  const videoId = data.videoDetails?.videoId;
+  if (!videoId) throw new Error('Could not determine video ID.');
 
   const title = sanitizeFilename(data.videoDetails?.title || 'youtube-video');
+
+  // Strategy 1: InnerTube API with Android client.
+  // Returns plain URLs (no signatureCipher), much more reliable than parsing the player JS.
+  try {
+    const formats = await fetchInnerTubeFormats(videoId);
+    if (formats && formats.length) return { title, formats };
+  } catch (e) {
+    console.warn('[social-downloader] InnerTube strategy failed, falling back:', e.message);
+  }
+
+  // Strategy 2: Parse ytInitialPlayerResponse with signature decipher + nsig.
+  const streaming = data.streamingData;
+  if (!streaming) throw new Error('No streaming data available. The video may be private or age-restricted.');
 
   const allFormats = [
     ...(streaming.formats || []),
@@ -57,18 +70,20 @@ async function extractYouTube() {
   const cipherFormats = allFormats.filter((f) => !f.url && (f.signatureCipher || f.cipher));
 
   let decipheredFormats = [];
+  let decipherError = null;
   if (cipherFormats.length > 0) {
     try {
-      const ops = await getDecipherOps();
+      const ctx = await getDecipherContext();
       for (const f of cipherFormats) {
         try {
-          decipheredFormats.push({ f, url: applyDecipherToFormat(f, ops) });
-        } catch {
-          // skip formats that can't be deciphered
+          decipheredFormats.push({ f, url: applyDecipherToFormat(f, ctx) });
+        } catch (err) {
+          console.warn('[social-downloader] format decipher skipped:', err.message);
         }
       }
-    } catch {
-      // decipher unavailable — fall through to plain formats only
+    } catch (err) {
+      decipherError = err.message;
+      console.error('[social-downloader] decipher failed:', err);
     }
   }
 
@@ -78,7 +93,8 @@ async function extractYouTube() {
   ];
 
   if (!allResolved.length) {
-    throw new Error('No downloadable streams found. YouTube may have changed their encryption. Try reloading the page.');
+    const reason = decipherError ? ` (${decipherError})` : '';
+    throw new Error(`No downloadable streams found. YouTube may have changed their encryption${reason}. Try reloading the page.`);
   }
 
   const formats = allResolved.map(({ f, url }) => {
@@ -99,23 +115,115 @@ async function extractYouTube() {
   return { title, formats };
 }
 
-function applyDecipherToFormat(f, ops) {
+// ---------------------------------------------------------------------------
+// InnerTube API strategy — Android client returns plain URLs, no cipher needed.
+// ---------------------------------------------------------------------------
+
+async function fetchInnerTubeFormats(videoId) {
+  const apiKey = window.ytcfg?.get('INNERTUBE_API_KEY') || '';
+  const url = `https://www.youtube.com/youtubei/v1/player${apiKey ? '?key=' + apiKey : ''}`;
+
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      videoId,
+      context: {
+        client: {
+          clientName: 'ANDROID',
+          clientVersion: '19.09.37',
+          androidSdkVersion: 30,
+          userAgent: 'com.google.android.youtube/19.09.37 (Linux; U; Android 12) gzip',
+          hl: 'en',
+          gl: 'US',
+        },
+      },
+    }),
+  });
+
+  if (!resp.ok) throw new Error(`InnerTube HTTP ${resp.status}`);
+  const data = await resp.json();
+
+  if (data.playabilityStatus?.status !== 'OK') {
+    throw new Error(`Not playable: ${data.playabilityStatus?.reason || data.playabilityStatus?.status}`);
+  }
+
+  const streaming = data.streamingData;
+  if (!streaming) throw new Error('No streamingData in InnerTube response');
+
+  const allFormats = [...(streaming.formats || []), ...(streaming.adaptiveFormats || [])];
+  const muxedSet = new Set(streaming.formats || []);
+
+  // Android client returns plain URLs — filter out any that still have ciphers.
+  const plainFormats = allFormats.filter((f) => f.url);
+  if (!plainFormats.length) throw new Error('InnerTube returned no plain URLs');
+
+  // Still apply nsig (n-param) transform to each URL.
+  const nsigFn = await getNsigFn();
+
+  return plainFormats.map((f) => {
+    let finalUrl = applyNsig(f.url, nsigFn);
+    const isMuxed = muxedSet.has(f);
+    const isAudio = (f.mimeType || '').startsWith('audio/');
+    return {
+      kind: isMuxed ? 'muxed' : (isAudio ? 'audio' : 'video'),
+      url: finalUrl,
+      qualityLabel: f.qualityLabel || '',
+      mimeType: f.mimeType || '',
+      bitrate: f.averageBitrate || f.bitrate || 0,
+      height: f.height || 0,
+      audioQuality: f.audioQuality || null,
+      contentLength: f.contentLength || null,
+    };
+  });
+}
+
+function applyNsig(url, nsigFn) {
+  if (!nsigFn) return url;
+  try {
+    const u = new URL(url);
+    const n = u.searchParams.get('n');
+    if (!n) return url;
+    const nt = nsigFn(n);
+    if (nt && nt !== n) { u.searchParams.set('n', nt); return u.toString(); }
+  } catch {}
+  return url;
+}
+
+async function getNsigFn() {
+  if (_decipherCache?.nsigFn) return _decipherCache.nsigFn;
+  try {
+    const playerUrl = resolvePlayerJsUrl();
+    if (!playerUrl) return null;
+    const jsText = await fetch(playerUrl).then((r) => r.text());
+    const fn = tryExtractNsigFn(jsText);
+    // Store so we don't re-fetch
+    _decipherCache = { ...(_decipherCache || {}), playerUrl, nsigFn: fn };
+    return fn;
+  } catch {
+    return null;
+  }
+}
+
+function applyDecipherToFormat(f, ctx) {
   const cipherStr = f.signatureCipher || f.cipher;
   const params = new URLSearchParams(cipherStr);
-  const url = params.get('url');
+  let url = params.get('url');
   const s = params.get('s');
   const sp = params.get('sp') || 'signature';
   if (!url || !s) throw new Error('Invalid cipher params');
-  const sig = runDecipherOps(s, ops);
-  return `${url}&${sp}=${encodeURIComponent(sig)}`;
+  const sig = runDecipherOps(s, ctx.ops);
+  url = `${url}&${sp}=${encodeURIComponent(sig)}`;
+
+  return applyNsig(url, ctx.nsigFn);
 }
 
-async function getDecipherOps() {
+async function getDecipherContext() {
   const playerUrl = resolvePlayerJsUrl();
   if (!playerUrl) throw new Error('Could not locate YouTube player JS');
 
   if (_decipherCache && _decipherCache.playerUrl === playerUrl) {
-    return _decipherCache.ops;
+    return _decipherCache;
   }
 
   const jsText = await fetch(playerUrl).then((r) => {
@@ -124,8 +232,10 @@ async function getDecipherOps() {
   });
 
   const ops = parseDecipherOps(jsText);
-  _decipherCache = { playerUrl, ops };
-  return ops;
+  const nsigFn = tryExtractNsigFn(jsText);
+  if (!nsigFn) console.warn('[social-downloader] nsig fn not found — downloads may get 403');
+  _decipherCache = { playerUrl, ops, nsigFn };
+  return _decipherCache;
 }
 
 function resolvePlayerJsUrl() {
@@ -141,6 +251,96 @@ function resolvePlayerJsUrl() {
 }
 
 // ---------------------------------------------------------------------------
+// nsig (n-parameter) transform — required since ~2022 to avoid 403 errors.
+// YouTube embeds an 'n' parameter in streaming URLs that must be transformed
+// by a function in the player JS before the URL can be used for download.
+// The function is self-contained (no closures), so new Function() works here.
+// ---------------------------------------------------------------------------
+
+function tryExtractNsigFn(jsText) {
+  try {
+    const ref = findNsigRef(jsText);
+    if (!ref) return null;
+    const fnStr = ref.index !== null
+      ? extractIndexedArrayFn(jsText, ref.name, ref.index)
+      : extractNamedFn(jsText, ref.name);
+    if (!fnStr) return null;
+    // eslint-disable-next-line no-new-func
+    return new Function(`return (${fnStr})`)();
+  } catch (err) {
+    console.warn('[social-downloader] nsig extract error:', err.message);
+    return null;
+  }
+}
+
+function findNsigRef(jsText) {
+  // Array-indexed call site: &&(b=NAME[idx](b)
+  let m = jsText.match(/&&\([a-z]=([a-zA-Z0-9$]{1,4})\[(\d+)\]\([a-z]\)/);
+  if (m) return { name: m[1], index: parseInt(m[2]) };
+  // Direct call site: &&(b=NAME(b),c.set("n"
+  m = jsText.match(/&&\([a-z]=([a-zA-Z0-9$]{2,})\([a-z]\),[a-z]\.set\("n"/);
+  if (m) return { name: m[1], index: null };
+  // Alternate array pattern: .get("n"))&&(b=NAME[0](b)
+  m = jsText.match(/\.get\("n"\)\)&&\(b=([a-zA-Z0-9$]{1,4})\[(\d+)\]\(b\)/);
+  if (m) return { name: m[1], index: parseInt(m[2]) };
+  // Alternate direct pattern
+  m = jsText.match(/\.get\("n"\)\)&&\(b=([a-zA-Z0-9$]{2,})\(b\)/);
+  if (m) return { name: m[1], index: null };
+  return null;
+}
+
+// Extract a named function (assignment or declaration style) using brace counting.
+function extractNamedFn(jsText, name) {
+  const esc = escapeRegex(name);
+  const m = jsText.match(new RegExp(`(?:function\\s+${esc}|${esc}\\s*=\\s*function)\\s*\\(`));
+  if (!m) return null;
+  const braceIdx = jsText.indexOf('{', m.index + m[0].length - 1);
+  if (braceIdx === -1) return null;
+  return extractByBraceCount(jsText, m.index, braceIdx);
+}
+
+// Extract the idx-th function literal from an array variable.
+function extractIndexedArrayFn(jsText, arrayName, idx) {
+  const esc = escapeRegex(arrayName);
+  const m = jsText.match(new RegExp(`${esc}\\s*=\\s*\\[`));
+  if (!m) return null;
+  const arrStart = jsText.indexOf('[', m.index + m[0].length - 1);
+  let fnCount = 0, i = arrStart + 1;
+  while (i < jsText.length) {
+    const fi = jsText.indexOf('function', i);
+    if (fi === -1 || jsText[fi - 1] === ']') break; // past array end
+    const bi = jsText.indexOf('{', fi);
+    if (bi === -1) break;
+    const fnStr = extractByBraceCount(jsText, fi, bi);
+    if (!fnStr) break;
+    if (fnCount === idx) return fnStr;
+    fnCount++;
+    i = fi + fnStr.length;
+  }
+  return null;
+}
+
+// Walk from braceIdx counting '{'/'}', return substring from defStart to closing '}'.
+// Handles string literals so brace characters inside strings are ignored.
+function extractByBraceCount(jsText, defStart, braceIdx) {
+  let depth = 0, inStr = false, strCh = '';
+  for (let i = braceIdx; i < jsText.length; i++) {
+    const ch = jsText[i];
+    if (inStr) {
+      if (ch === strCh && jsText[i - 1] !== '\\') inStr = false;
+    } else if (ch === '"' || ch === "'" || ch === '`') {
+      inStr = true; strCh = ch;
+    } else if (ch === '{') {
+      depth++;
+    } else if (ch === '}') {
+      depth--;
+      if (depth === 0) return jsText.substring(defStart, i + 1);
+    }
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Decipher algorithm parser — no eval/new Function needed.
 // YouTube's signature decipher is always a sequence of three possible ops:
 //   reverse(a), splice(a, n), swap(a, n)
@@ -149,30 +349,47 @@ function resolvePlayerJsUrl() {
 
 function parseDecipherOps(jsText) {
   const fnName = findDecipherFnName(jsText);
-  if (!fnName) throw new Error('Could not identify decipher function');
+  if (!fnName) throw new Error('Could not identify decipher function name');
 
-  const bodyMatch = jsText.match(
-    new RegExp(`${escapeRegex(fnName)}=function\\(\\w\\)\\{([^}]+)\\}`)
-  );
-  if (!bodyMatch) throw new Error('Could not extract decipher function body');
-  const fnBody = bodyMatch[1];
+  const esc = escapeRegex(fnName);
+  // Support both: fnName=function(param){body}  and  function fnName(param){body}
+  const bodyMatch =
+    jsText.match(new RegExp(`${esc}=function\\((\\w+)\\)\\{([^}]+)\\}`)) ||
+    jsText.match(new RegExp(`function\\s+${esc}\\s*\\((\\w+)\\)\\s*\\{([^}]+)\\}`));
+  if (!bodyMatch) throw new Error(`Could not extract body of decipher function "${fnName}"`);
+  const paramName = bodyMatch[1];
+  const fnBody = bodyMatch[2];
 
-  const helperMatch = fnBody.match(/;(\w+)\.\w+\(a/);
-  if (!helperMatch) throw new Error('Could not identify helper object');
+  const helperMatch = fnBody.match(new RegExp(`;?(\\w+)\\.\\w+\\(${escapeRegex(paramName)}`));
+  if (!helperMatch) throw new Error('Could not identify helper object in decipher body');
   const helperName = helperMatch[1];
 
   const methodMap = extractHelperMethodMap(jsText, helperName);
-  if (!methodMap.size) throw new Error('Could not parse helper methods');
+  if (!methodMap.size) throw new Error(`Could not parse helper methods from object "${helperName}"`);
 
-  return buildOpSequence(fnBody, helperName, methodMap);
+  return buildOpSequence(fnBody, helperName, paramName, methodMap);
 }
 
 function findDecipherFnName(jsText) {
   const patterns = [
+    // yt-dlp-style: general encodeURIComponent pattern around signature setting
+    /\b[a-zA-Z0-9$]+\s*&&\s*[a-zA-Z0-9$]+\.set\([^,]+,\s*encodeURIComponent\s*\(\s*(\w+)\s*\(/,
+    /\b[cs]\s*&&\s*[adf]\.set\([^,]+,\s*encodeURIComponent\s*\(\s*(\w+)\s*\(/,
+    // Classic pattern
     /\bc&&d\.set\([^,]+,\s*(?:encodeURIComponent\s*\()?\s*(\w+)\s*\(/,
     /\.sig\s*\|\|\s*(\w+)\s*\(/,
+    // Split("") function definition — flexible variable name
+    /(?:\b|[^a-zA-Z0-9$])(\w{2,})\s*=\s*function\s*\(\s*\w\s*\)\s*\{\s*\w\s*=\s*\w\s*\.split\s*\(\s*""\s*\)/,
     /(?:^|[;,{(])(\w+)=function\(\w\)\{\w=\w\.split\(""\)/m,
+    // signatureCipher nearby
     /\bsignatureCipher\b[\s\S]{0,300}?(\w+)\s*\(\s*decodeURIComponent/,
+    // "signature" string literal near the call
+    /\.set\(["']signature["']\s*,\s*(\w+)\s*\(/,
+    /["']signature["']\s*,\s*(\w+)\s*\(\s*decodeURIComponent/,
+    // Ternary/conditional pattern
+    /\(\w+\)\s*\?\s*\w+\.set\([^,]+,\s*(\w+)\s*\(\s*\w+\s*\)\s*\)/,
+    // Fallback: any 2+ char fn immediately before decodeURIComponent
+    /[;,]\s*(\w{2,})\s*\(\s*decodeURIComponent\s*\(\s*\w+\.get\s*\(\s*["']s["']/,
   ];
   for (const p of patterns) {
     const m = jsText.match(p);
@@ -183,13 +400,26 @@ function findDecipherFnName(jsText) {
 
 function extractHelperMethodMap(jsText, helperName) {
   const escaped = escapeRegex(helperName);
-  const m = jsText.match(new RegExp(`var\\s+${escaped}\\s*=\\s*\\{([\\s\\S]+?)\\}\\s*;`));
-  if (!m) throw new Error(`Helper object "${helperName}" not found`);
+  const declarationPatterns = [
+    new RegExp(`var\\s+${escaped}\\s*=\\s*\\{([\\s\\S]+?)\\}\\s*;`),
+    new RegExp(`(?:let|const)\\s+${escaped}\\s*=\\s*\\{([\\s\\S]+?)\\}\\s*;`),
+    new RegExp(`${escaped}\\s*=\\s*\\{([\\s\\S]+?)\\}\\s*;`),
+    // Without semicolon terminator (some minifiers omit it)
+    new RegExp(`var\\s+${escaped}\\s*=\\s*\\{([\\s\\S]+?)\\}(?=\\s*(?:var|let|const|function|\\())`),
+    new RegExp(`${escaped}\\s*=\\s*\\{([\\s\\S]+?)\\}(?=\\s*(?:var|let|const|function|\\())`),
+  ];
+
+  let bodyContent = null;
+  for (const pat of declarationPatterns) {
+    const m = jsText.match(pat);
+    if (m) { bodyContent = m[1]; break; }
+  }
+  if (!bodyContent) throw new Error(`Helper object "${helperName}" not found`);
 
   const map = new Map();
   const re = /(\w+)\s*:\s*function\s*\([^)]*\)\s*\{([^}]+)\}/g;
   let match;
-  while ((match = re.exec(m[1])) !== null) {
+  while ((match = re.exec(bodyContent)) !== null) {
     const type = classifyOp(match[2]);
     if (type) map.set(match[1], type);
   }
@@ -199,13 +429,16 @@ function extractHelperMethodMap(jsText, helperName) {
 function classifyOp(fnBody) {
   if (/\.reverse\(\)/.test(fnBody)) return 'reverse';
   if (/\.splice\s*\(\s*0/.test(fnBody)) return 'splice';
-  if (/a\[0\]/.test(fnBody) && /a\.length/.test(fnBody)) return 'swap';
+  // Use \w instead of hardcoded 'a' since the parameter name can vary
+  if (/\w\[0\]/.test(fnBody) && /\w\.length/.test(fnBody)) return 'swap';
   return null;
 }
 
-function buildOpSequence(fnBody, helperName, methodMap) {
+function buildOpSequence(fnBody, helperName, paramName, methodMap) {
   const ops = [];
-  const re = new RegExp(`${escapeRegex(helperName)}\\.(\\w+)\\(a\\s*,?\\s*(\\d+)?\\s*\\)`, 'g');
+  const escapedHelper = escapeRegex(helperName);
+  const escapedParam = escapeRegex(paramName);
+  const re = new RegExp(`${escapedHelper}\\.(\\w+)\\(${escapedParam}\\s*,?\\s*(\\d+)?\\s*\\)`, 'g');
   let m;
   while ((m = re.exec(fnBody)) !== null) {
     const type = methodMap.get(m[1]);

@@ -45,6 +45,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       .catch((err) => sendResponse({ error: err.message }));
     return true;
   }
+
+  if (message.type === 'COBALT_MP3_REQUEST') {
+    handleCobaltMP3(message.payload)
+      .then((downloadId) => sendResponse({ success: true, downloadId }))
+      .catch((err) => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
 });
 
 async function handleDownload({ url, filename, platform }) {
@@ -72,6 +79,51 @@ function isAllowedDownloadUrl(url, platform) {
   } catch {
     return false;
   }
+}
+
+async function handleCobaltMP3({ videoId, filename }) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
+  let resp;
+  try {
+    resp = await fetch('https://api.cobalt.tools/', {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify({
+        url: `https://www.youtube.com/watch?v=${videoId}`,
+        downloadMode: 'audio',
+        audioFormat: 'mp3',
+        audioBitrate: '128',
+      }),
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (!resp.ok) {
+    throw new Error(`MP3 conversion service unavailable (${resp.status}). Try again later.`);
+  }
+
+  const cobalt = await resp.json();
+
+  if (cobalt.status === 'error') {
+    const code = cobalt.error?.code || 'unknown';
+    throw new Error(`Conversion failed: ${code}. The video may be age-restricted or unavailable.`);
+  }
+
+  const url = cobalt.url;
+  if (!url) throw new Error('No download URL returned from conversion service.');
+
+  return new Promise((resolve, reject) => {
+    chrome.downloads.download({ url, filename, saveAs: false }, (downloadId) => {
+      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+      else resolve(downloadId);
+    });
+  });
 }
 
 function deepMerge(defaults, overrides) {

@@ -3,6 +3,8 @@
 
 // Maps element ID → [platform, settingKey]
 const CONTROLS = {
+  'cobalt-api-key':    ['cobalt',    'apiKey'],
+  'cobalt-instance-url': ['cobalt', 'instanceUrl'],
   'yt-video-quality':  ['youtube',   'videoQuality'],
   'yt-audio-quality':  ['youtube',   'audioQuality'],
   'fb-video-quality':  ['facebook',  'videoQuality'],
@@ -48,6 +50,9 @@ function showSaved() {
 // Auto-save on every change
 document.querySelectorAll('select, input[type="checkbox"]').forEach((el) => {
   el.addEventListener('change', saveSettings);
+});
+document.querySelectorAll('input[type="text"]').forEach((el) => {
+  el.addEventListener('blur', saveSettings);
 });
 
 loadSettings();

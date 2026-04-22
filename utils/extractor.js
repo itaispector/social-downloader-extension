@@ -130,14 +130,17 @@ async function fetchInnerTubeFormats(videoId) {
       videoId,
       context: {
         client: {
-          clientName: 'ANDROID',
-          clientVersion: '19.09.37',
+          // ANDROID_TESTSUITE bypasses PO-token requirements and reliably
+          // returns plain (non-ciphered) streaming URLs.
+          clientName: 'ANDROID_TESTSUITE',
+          clientVersion: '1.9',
           androidSdkVersion: 30,
-          userAgent: 'com.google.android.youtube/19.09.37 (Linux; U; Android 12) gzip',
           hl: 'en',
           gl: 'US',
         },
       },
+      racyCheckOk: true,
+      contentCheckOk: true,
     }),
   });
 

@@ -15,6 +15,10 @@ const DEFAULT_SETTINGS = {
     watermark: false,
     preferredType: 'video',
   },
+  cobalt: {
+    apiKey: '',
+    instanceUrl: 'https://api.cobalt.tools/',
+  },
 };
 
 const CDN_ALLOWLIST = {
@@ -82,17 +86,26 @@ function isAllowedDownloadUrl(url, platform) {
 }
 
 async function handleCobaltMP3({ videoId, filename }) {
+  const stored = await chrome.storage.sync.get('cobalt');
+  const apiKey = stored?.cobalt?.apiKey?.trim() || '';
+  const instanceUrl = stored?.cobalt?.instanceUrl?.trim() || 'https://api.cobalt.tools/';
+
+  const headers = {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+  };
+  if (apiKey) {
+    headers['Authorization'] = `Api-Key ${apiKey}`;
+  }
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30000);
   let resp;
   try {
-    resp = await fetch('https://api.cobalt.tools/', {
+    resp = await fetch(instanceUrl, {
       method: 'POST',
       signal: controller.signal,
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-      },
+      headers,
       body: JSON.stringify({
         url: `https://www.youtube.com/watch?v=${videoId}`,
         downloadMode: 'audio',
@@ -105,7 +118,10 @@ async function handleCobaltMP3({ videoId, filename }) {
   }
 
   if (!resp.ok) {
-    throw new Error(`MP3 conversion service unavailable (${resp.status}). Try again later.`);
+    const hint = resp.status === 401
+      ? ' Add your Cobalt API key in the extension settings.'
+      : ' Try again later.';
+    throw new Error(`MP3 conversion service unavailable (${resp.status}).${hint}`);
   }
 
   const cobalt = await resp.json();

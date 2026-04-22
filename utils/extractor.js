@@ -116,69 +116,105 @@ async function extractYouTube() {
 }
 
 // ---------------------------------------------------------------------------
-// InnerTube API strategy — Android client returns plain URLs, no cipher needed.
+// InnerTube API strategy — returns plain URLs, no cipher needed.
 // ---------------------------------------------------------------------------
+
+// Clients tried in order; first one returning playabilityStatus OK wins.
+const INNERTUBE_CLIENTS = [
+  {
+    // TV embedded player — reliably bypasses PO-token and age-gate checks.
+    clientName: 'TVHTML5_SIMPLY_EMBEDDED_PLAYER',
+    clientVersion: '2.0',
+    hl: 'en',
+    gl: 'US',
+    // embedUrl required by this client type.
+    _embedUrl: 'https://www.youtube.com/',
+  },
+  {
+    // Web embedded player — good second choice.
+    clientName: 'WEB_EMBEDDED_PLAYER',
+    clientVersion: '2.20240726.00.00',
+    hl: 'en',
+    gl: 'US',
+    _embedUrl: 'https://www.youtube.com/',
+  },
+  {
+    // Android client — kept as last resort; may require PO-token on some videos.
+    clientName: 'ANDROID',
+    clientVersion: '19.44.38',
+    androidSdkVersion: 30,
+    userAgent: 'com.google.android.youtube/19.44.38 (Linux; U; Android 11) gzip',
+    hl: 'en',
+    gl: 'US',
+  },
+];
 
 async function fetchInnerTubeFormats(videoId) {
   const apiKey = window.ytcfg?.get('INNERTUBE_API_KEY') || '';
   const url = `https://www.youtube.com/youtubei/v1/player${apiKey ? '?key=' + apiKey : ''}`;
 
-  const resp = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
+  let lastError = null;
+  for (const clientCfg of INNERTUBE_CLIENTS) {
+    const { _embedUrl, ...client } = clientCfg;
+    const body = {
       videoId,
       context: {
-        client: {
-          // ANDROID_TESTSUITE bypasses PO-token requirements and reliably
-          // returns plain (non-ciphered) streaming URLs.
-          clientName: 'ANDROID_TESTSUITE',
-          clientVersion: '1.9',
-          androidSdkVersion: 30,
-          hl: 'en',
-          gl: 'US',
-        },
+        client,
+        ...(_embedUrl ? { thirdParty: { embedUrl: _embedUrl } } : {}),
       },
       racyCheckOk: true,
       contentCheckOk: true,
-    }),
-  });
+    };
 
-  if (!resp.ok) throw new Error(`InnerTube HTTP ${resp.status}`);
-  const data = await resp.json();
+    let data;
+    try {
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok) { lastError = new Error(`InnerTube HTTP ${resp.status}`); continue; }
+      data = await resp.json();
+    } catch (e) {
+      lastError = e;
+      continue;
+    }
 
-  if (data.playabilityStatus?.status !== 'OK') {
-    throw new Error(`Not playable: ${data.playabilityStatus?.reason || data.playabilityStatus?.status}`);
+    if (data.playabilityStatus?.status !== 'OK') {
+      lastError = new Error(`Not playable (${client.clientName}): ${data.playabilityStatus?.reason || data.playabilityStatus?.status}`);
+      console.warn('[social-downloader]', lastError.message);
+      continue;
+    }
+
+    const streaming = data.streamingData;
+    if (!streaming) { lastError = new Error('No streamingData in InnerTube response'); continue; }
+
+    const allFormats = [...(streaming.formats || []), ...(streaming.adaptiveFormats || [])];
+    const muxedSet = new Set(streaming.formats || []);
+
+    const plainFormats = allFormats.filter((f) => f.url);
+    if (!plainFormats.length) { lastError = new Error('InnerTube returned no plain URLs'); continue; }
+
+    const nsigFn = await getNsigFn();
+
+    return plainFormats.map((f) => {
+      const finalUrl = applyNsig(f.url, nsigFn);
+      const isMuxed = muxedSet.has(f);
+      const isAudio = (f.mimeType || '').startsWith('audio/');
+      return {
+        kind: isMuxed ? 'muxed' : (isAudio ? 'audio' : 'video'),
+        url: finalUrl,
+        qualityLabel: f.qualityLabel || '',
+        mimeType: f.mimeType || '',
+        bitrate: f.averageBitrate || f.bitrate || 0,
+        height: f.height || 0,
+        audioQuality: f.audioQuality || null,
+        contentLength: f.contentLength || null,
+      };
+    });
   }
 
-  const streaming = data.streamingData;
-  if (!streaming) throw new Error('No streamingData in InnerTube response');
-
-  const allFormats = [...(streaming.formats || []), ...(streaming.adaptiveFormats || [])];
-  const muxedSet = new Set(streaming.formats || []);
-
-  // Android client returns plain URLs — filter out any that still have ciphers.
-  const plainFormats = allFormats.filter((f) => f.url);
-  if (!plainFormats.length) throw new Error('InnerTube returned no plain URLs');
-
-  // Still apply nsig (n-param) transform to each URL.
-  const nsigFn = await getNsigFn();
-
-  return plainFormats.map((f) => {
-    let finalUrl = applyNsig(f.url, nsigFn);
-    const isMuxed = muxedSet.has(f);
-    const isAudio = (f.mimeType || '').startsWith('audio/');
-    return {
-      kind: isMuxed ? 'muxed' : (isAudio ? 'audio' : 'video'),
-      url: finalUrl,
-      qualityLabel: f.qualityLabel || '',
-      mimeType: f.mimeType || '',
-      bitrate: f.averageBitrate || f.bitrate || 0,
-      height: f.height || 0,
-      audioQuality: f.audioQuality || null,
-      contentLength: f.contentLength || null,
-    };
-  });
+  throw lastError || new Error('All InnerTube clients failed');
 }
 
 function applyNsig(url, nsigFn) {
